@@ -1,22 +1,36 @@
+%%%-------------------------------------------------------------------
+%%% Alex Robson - 7-7-2011
+%%% TL;DR -> Now inotify will only process it's own messages.
+%%%
+%%% There were 'catch-alls' in the receive blocks of call_port and
+%%% controlling_process which caused messages sent to the hosting
+%%% process to be 'cannibalized' and returned as the result of inotify
+%%% function calls. This being a very undesirable behavior, I've
+%%% changed the code to *always* prefix messages sent from the loop
+%%% to the caller with ?MODULE so that the receives can be selective
+%%% and only handle messages that were created by inotify.
+%%%-------------------------------------------------------------------
 -module(inotify).
 -export([start/1, stop/0]).
 -export([test_start/0, test_end/2, test/0]).
 -export([open/0, controlling_process/1, add/3, remove/2, list/0, close/1]).
 
+
+
 start(Controller) when is_pid(Controller) ->
     spawn(fun() ->
-		  register(?MODULE, self()),
-		  process_flag(trap_exit, true),
-		  Port = open_port({spawn, executable()},
-				   [{packet, 2}, binary, exit_status]),
-		  loop(Port, Controller)
-		  %% The following is only used for development and testing
-		  %% try loop(Port, Controller)
-		  %% catch
-		  %%    T:Err ->
-		  %%	  error_logger:error_msg("catch: ~p:~p~n", [T, Err])
-		  %% end
-	  end).
+                  register(?MODULE, self()),
+                  process_flag(trap_exit, true),
+                  Port = open_port({spawn, executable()},
+                                   [{packet, 2}, binary, exit_status]),
+                  loop(Port, Controller)
+                  %% The following is only used for development and testing
+                  %% try loop(Port, Controller)
+                  %% catch
+                  %%    T:Err ->
+                  %%	  error_logger:error_msg("catch: ~p:~p~n", [T, Err])
+                  %% end
+          end).
 
 stop() ->
     ?MODULE ! stop.
@@ -81,11 +95,11 @@ test_player(File) ->
 
 test_listener() ->
     receive
-	stop ->
-	    ok;
-	Msg ->
-	    io:format("listener got: ~p~n", [Msg]),
-	    test_listener()
+        stop ->
+            ok;
+        Msg ->
+            io:format("listener got: ~p~n", [Msg]),
+            test_listener()
     end.
 
 %%
@@ -97,7 +111,7 @@ open() ->
 %% add(Fd, Pathname, EventList) -> {ok, Wd} | {error, Reason}
 %%
 add(Fd, Pathname, EventList) when is_integer(Fd), is_list(Pathname),
-				  (is_atom(EventList) orelse is_list(EventList)) ->
+                                  (is_atom(EventList) orelse is_list(EventList)) ->
     call_port({add, Fd, Pathname, EventList}).
 
 %%
@@ -106,10 +120,8 @@ add(Fd, Pathname, EventList) when is_integer(Fd), is_list(Pathname),
 controlling_process(Pid) ->
     ?MODULE ! {controlling_process, self(), Pid},
     receive
-	{?MODULE, Result} ->
-	    Result;
-	Other ->
-          Other
+        {?MODULE, Result} ->
+            Result
     end.
 
 %%
@@ -132,63 +144,61 @@ close(Fd) when is_integer(Fd) ->
 call_port(Msg) ->
     ?MODULE ! {call, self(), Msg},
     receive
-	{?MODULE, Result} ->
-	    Result;
-	Other ->
-	    Other
+        {?MODULE, Result} ->
+            Result
     end.
 
 loop(Port, Controller) ->
     receive
-	{call, Caller, Msg} ->
-	    erlang:port_command(Port, term_to_binary(Msg)),
-	    receive
-		{Port, {data, Data}} ->
-		    Caller ! binary_to_term(Data);
-		{Port, {exit_status, Status}} when Status > 128 ->
-		    exit({port_terminated, Status});
-		{Port, {exit_status, Status}} ->
-		    exit({port_terminated, Status});
-		{'EXIT', Port, Reason} ->
-		    exit(Reason)
-                %%   following two lines used for development and testing only
-		%% Other ->
-		%%    io:format("received: ~p~n", [Other])
-	    end,
-	    loop(Port, Controller);
-	{Port, {data, Msg}} ->
-	    Controller ! binary_to_term(Msg),
-	    loop(Port, Controller);
-	{controlling_process, Caller, Pid} ->
-	    Caller ! ok,
-	    loop(Port, Pid);
-	stop ->
-	    erlang:port_close(Port),
-	    exit(normal);
-	{'EXIT', Port, Reason} ->
-	    exit({port_terminated, Reason});
-	_Other ->
-	    loop(Port, Controller)
+        {call, Caller, Msg} ->
+            erlang:port_command(Port, term_to_binary(Msg)),
+            receive
+                {Port, {data, Data}} ->
+                    Caller ! {?MODULE, binary_to_term(Data)};
+                {Port, {exit_status, Status}} when Status > 128 ->
+                    exit({port_terminated, Status});
+                {Port, {exit_status, Status}} ->
+                    exit({port_terminated, Status});
+                {'EXIT', Port, Reason} ->
+                    exit(Reason)
+                    %%   following two lines used for development and testing only
+                    %% Other ->
+                    %%    io:format("received: ~p~n", [Other])
+            end,
+            loop(Port, Controller);
+        {Port, {data, Msg}} ->
+            Controller ! {?MODULE, binary_to_term(Msg)},
+            loop(Port, Controller);
+        {controlling_process, Caller, Pid} ->
+            Caller ! {?MODULE, ok},
+            loop(Port, Pid);
+        stop ->
+            erlang:port_close(Port),
+            exit(normal);
+        {'EXIT', Port, Reason} ->
+            exit({port_terminated, Reason});
+        _Other ->
+            loop(Port, Controller)
     end.
 
 executable() ->
-  Parts = [[filename:dirname(code:which(?MODULE)),"..",c_src],
-           [code:priv_dir(inotify),bin]],
-  try E = take_first(fun to_file/1, Parts),
-      io:fwrite("using: ~p~n",[E]),
-      E
-  catch _:_ -> exit({inotify_binary_not_found,Parts})
-  end.
+    Parts = [[filename:dirname(code:which(?MODULE)),"..",c_src],
+             [code:priv_dir(inotify),bin]],
+    try E = take_first(fun to_file/1, Parts),
+          io:fwrite("using: ~p~n",[E]),
+          E
+    catch _:_ -> exit({inotify_binary_not_found,Parts})
+    end.
 
 to_file(Parts) ->
-  true = filelib:is_regular(F=filename:join(Parts++[inotify])),
-  F.
+    true = filelib:is_regular(F=filename:join(Parts++[inotify])),
+    F.
 
 take_first(_,[]) -> exit({take_first,nothing_worked});
 take_first(F,[H|T]) ->
-  try F(H)
-  catch _:_ -> take_first(F,T)
-  end.
+    try F(H)
+    catch _:_ -> take_first(F,T)
+    end.
 
 
 
